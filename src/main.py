@@ -6,6 +6,21 @@ import time
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 import json
+from pydantic import BaseModel, ValidationError
+from typing import Optional
+
+
+class BookRecord(BaseModel):
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: str
+    description: Optional[str]
+    source_page: str
+    fetched_at: str
+
 
 def get_book_cache_path(book_url):
     folder_name = book_url.rstrip("/").split("/")[-2]
@@ -116,6 +131,33 @@ def extract_book(book_url, source_page):
         "fetched_at": fetched_at,
     }
 
+def validate_record(raw_record):
+    try:
+        price_gbp = float(raw_record["price_text"].replace("£", ""))
+        cleaned_availability = raw_record["availability_text"].strip()
+
+        book_record = BookRecord(
+            title=raw_record["title"],
+            product_url=raw_record["product_url"],
+            price_text=raw_record["price_text"],
+            price_gbp=price_gbp,
+            availability_text=cleaned_availability,
+            rating_text=raw_record["rating_text"],
+            description=raw_record["description"],
+            source_page=raw_record["source_page"],
+            fetched_at=raw_record["fetched_at"],
+        )
+        return book_record, None
+
+    except ValueError as e:
+        return None, f"Data conversion error: {str(e)}"
+    except ValidationError as e:
+        return None, f"Schema validation error: {str(e)}"
+    except Exception as e:
+        return None, f"Unexpected error: {str(e)}"
+
+
+    
 if __name__ == "__main__":
     start_url = "https://books.toscrape.com/catalogue/page-1.html"
     
@@ -124,24 +166,41 @@ if __name__ == "__main__":
     book_urls = get_catalogue_urls(start_url)
     print(f"catalogue_pages = 3, discovered = {len(book_urls)}, unique_urls = {len(set(book_urls))}")
 
-    # 2. Extract records (Stage 3)
+    # 2. Extract and Validate records (Stage 3 & 4)
     print("\n--- Starting Extraction ---")
-    records = []
+    valid_records = []
+    error_records = []
     
     for book_url, source_page in book_urls:
         cache_path = get_book_cache_path(book_url)
         was_cached = os.path.exists(cache_path)
 
-        record = extract_book(book_url, source_page)
-        if record:
-            records.append(record)
+        raw_record = extract_book(book_url, source_page)
+        
+        if raw_record:
+            validated_record, error_msg = validate_record(raw_record)
+            
+            if validated_record:
+                valid_records.append(validated_record.model_dump())
+            else:
+                error_records.append({"url": book_url, "error": error_msg})
 
         if not was_cached:
             time.sleep(0.5)
 
-
-    print("\n--- Stage 3 Checkpoint ---")
-    if records:
-        print(json.dumps(records[0], indent=2))
+    print("\n--- Stage 3/4 Checkpoint ---")
+    if valid_records:
+        print("Sample Validated Record:")
+        print(json.dumps(valid_records[0], indent=2))
     
-    print(f"\ndetail_pages = {len(records)}")
+    print(f"\ndetail_pages fetched = {len(book_urls)}")
+    print(f"valid_records = {len(valid_records)}")
+    print(f"errors = {len(error_records)}")
+
+    os.makedirs("output", exist_ok=True)
+
+    with open("output/books.json", "w", encoding="utf-8") as f:
+        json.dump(valid_records, f, indent=2, ensure_ascii=False)
+
+    with open("output/errors.json", "w", encoding="utf-8") as f:
+        json.dump(error_records, f, indent=2, ensure_ascii=False)
